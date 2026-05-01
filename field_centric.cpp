@@ -1,18 +1,53 @@
 #include <PTBOTAtomVX.h>
 #include <Bluepad32.h>
-
-#define MAX_CONTROLLERS BP32_MAX_GAMEPADS
-ControllerPtr myControllers[MAX_CONTROLLERS];
+#include <unordered_map>
+#include <functional>
+#include <string>
 
 typedef struct _ControllerData {
     int8_t index, l1, r1, up, down, left, right, triangle, cross, square, circle; // 0, 1 boolean
-    double lx, ly, rx, ry, l2, r2, battery; // 0.00 - 1.00 range
+    double lx, ly, rx, ry, l2, r2; // 0.00 - 1.00 range
 } ControllerData_t;
 
+typedef struct _PIDController {
+    double kp, ki, kd, integral, prev_err, prev_time;
+} PIDController_t;
+
+typedef struct _TaskManager {
+    std::function<void()> func;
+    double triggerTime, interval;
+    bool repeat, active;
+} Tasks_t;
+
+ControllerPtr myControllers[BP32_MAX_GAMEPADS];
+std::unordered_map<std::string, Tasks_t> tasks;
 ControllerData_t controller;
+PIDController_t pid;
+
+void taskCreate(const std::string& name, std::function<void()> func, double delay, bool repeat = false) {
+    tasks[name] = {
+        .func = func,
+        .triggerTime = ticks_ms() + delay,
+        .repeat = repeat,
+        .interval = delay,
+        .active = true
+    }
+}
+
+void taskUpdate() {
+    double now = ticks_ms();
+    for (auto& [name, task] : tasks) {
+        if (!task.active) continue;
+        if (ticks_diff(now, task.triggerTime) >= 0) {
+            task.func();
+            if (task.repeat) task.triggerTime += task.interval;
+            else task.active = false;
+        }
+    }
+}
 
 void onConnectedController(ControllerPtr ctl) {
-    for (int i = 0; i < MAX_CONTROLLERS; i++) {
+    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
         if (!myControllers[i]) {
             myControllers[i] = ctl;
             return;
@@ -21,7 +56,7 @@ void onConnectedController(ControllerPtr ctl) {
 }
 
 void onDisconnectedController(ControllerPtr ctl) {
-    for (int i = 0; i < MAX_CONTROLLERS; i++) {
+    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
         if (myControllers[i] == ctl) {
             myControllers[i] = nullptr;
             return;
@@ -29,8 +64,8 @@ void onDisconnectedController(ControllerPtr ctl) {
     }
 }
 
-uint8_t getControllerData(ControllerData_t* ControllerData) {
-    if (!BP32.update()) return 0;
+void getControllerData(ControllerData_t* ControllerData) {
+    if (!BP32.update()) return;
     for (auto ctl : myControllers) {
         if (ctl && ctl->isConnected() && ctl->hasData() && ctl->isGamepad()) {
             uint8_t buffdpad = ctl->dpad();
@@ -53,75 +88,125 @@ uint8_t getControllerData(ControllerData_t* ControllerData) {
             ControllerData->cross = (buffbutton >> 0) & 1;
             ControllerData->square = (buffbutton >> 2) & 1;
             ControllerData->circle = (buffbutton >> 1) & 1;
-            ControllerData->battery = (double) ctl->battery() / 255.0;
         }
     }
-
-    return 1;
 }
 
+double maxf64(double val1, double val2) { return (val1 > val2) ? val1 : val2; }
+double minf64(double val1, double val2) { return (val1 < val2) ? val1 : val2; }
+double clampf64(double val, double min, double max) { return maxf64(minf64(val, max), min); }
 
-float Power_FL, Power_FR, Power_BL, Power_BR;
-float yawOffset = 0;
-int spd = 40;
+double wrapRads(double val) {
+    while (val > PI) val -= PI*2;
+    while (val < -PI) val += PI*2;
+    return val;
+}
 
-// Arduino setup function. Runs in CPU 1
+bool pressOnce(const std::string& name, bool current) {
+    static std::unordered_map<std::string, bool> buttonStates;
+    bool clicked = current && !buttonStates[name];
+    buttonStates[name] = current;
+    
+    return clicked;
+}
+
+double yawOffset = 0.0;
+double setpoint = 0.0;
+double getYaw() { return wrapRads((angleRead(YAW) - yawOffset) * PI / 180.0); }
+
+double calculatePID(PIDController_t* pid, double setpoint, double current) {
+    double now = ticks_ms();
+    double dt = ticks_diff(now, pid->prev_time) / 1000.0;
+    pid->prev_time = now;
+    
+    if (dt <= 0 || dt > 0.1) dt = 0.01;
+    
+    double error = wrapRads(setpoint - current);
+    
+    pid->integral += error * dt;
+    pid->integral = clampf64(pid->integral, -1, 1);
+    
+    double derivative = (error - pid->prev_err) / dt;
+    pid->prev_err = error;
+    
+    return clampf64(pid->kp * error + pid->ki * pid->integral + pid->kd * derivative, -1, 1)
+}
+
+double linearHeading(double yaw) {
+    static bool wasTurning = false;
+    double rx = -controller.rx;
+    bool turning = fabs(rx) > 0.1;
+
+    if (turning) {
+        wasTurning = true;
+        return rx;
+    }
+
+    if (wasTurning) {
+        setpoint = yaw;
+        wasTurning = false;
+    }
+
+    double rotation = calculatePID(&pid, setpoint, yaw);
+    if (fabs(wrapRads(setpoint - yaw)) < 0.01) rotation = 0;
+    return rotation;
+}
+
+double speedControl(double value, double onControlled) {
+    double absVal = fabs(value);
+    if (controller.r2) return value * onControlled;
+    if (absVal <= 0.1) return 0;
+    if (absVal <= 0.4) return value * 0.35;
+    return value;
+}
+
+void control() {
+    if (pressOnce("reset", controller.square)) {
+        yawOffset = angleRead(YAW);
+        setpoint = 0.0;
+    }
+
+    if (pressOnce("pickup", controller.l1)) {
+
+    }
+}
+
+void movement() {
+    double yaw = getYaw();
+
+    double lx = speedControl(controller.lx, 0.25);
+    double ly = -speedControl(controller.ly, 0.15);
+
+    double x = (cos(yaw) * lx) + (sin(yaw) * ly);
+    double y = (sin(yaw) * lx) + (cos(yaw) * ly);
+    double r = linearHeading(yaw);
+    double d = maxf64(fabs(x) + fabs(y) + fabs(r), 1);
+
+    double fl = (((y - x - r) / d));
+    double fr = (((y + x + r) / d));
+    double rl = (((y - x + r) / d));
+    double rr = (((y + x - r) / d));
+
+    motorWrite(1, fl);
+    motorWrite(2, fr);
+    motorWrite(3, rl);
+    motorWrite(4, rr);
+}
+
 void setup() {
     Serial.begin(115200);
     initialize();
     // calibrateIMU();
 
-    // yawOffset = angleRead(YAW);
-
     BP32.setup(&onConnectedController, &onDisconnectedController);
 
+    pid.kp = 0.5;
+    pid.kd = 0.05;
 }
-
-
-float getYawRad() {
-      float yaw = angleRead(YAW) - yawOffset;
-
-      if (yaw > 180) yaw -= 360;
-      if (yaw < -180) yaw += 360;
-
-      return yaw * PI / 180.0;
-
-}
-
 
 void loop() {
     getControllerData(&controller);
-
-    float yawRad = getYawRad();
-  
-    float strafe = controller.lx;
-    float forward = -controller.ly;
-    float turn = controller.rx;
-
-    float rotX = strafe * cos(yawRad) - forward * sin(yawRad);
-    float rotY = strafe * sin(yawRad) + forward * cos(yawRad);
-
-    Power_FL = rotY + rotX + turn;
-    Power_FR = rotY - rotX - turn;
-    Power_BL = rotY - rotX + turn;
-    Power_BR = rotY + rotX - turn;
-
-    float maxVal = max(
-      max(abs(Power_FL), abs(Power_FR)),
-      max(abs(Power_BL), abs(Power_BR))
-    );
-
-    motorWrite(1,Power_FL * spd);
-    motorWrite(2,Power_FR * spd);
-    motorWrite(3,Power_BL * spd);
-    motorWrite(4,Power_BR * spd);
-
-    if (controller.circle) {
-      yawOffset = angleRead(YAW);
-    }
-
-    Serial.print(yawRad);
-    Serial.print("\n");
-
-    delay(10);
+    taskUpdate();
+    control();
+    movement();
 }
