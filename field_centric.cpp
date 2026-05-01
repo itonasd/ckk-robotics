@@ -10,12 +10,13 @@ typedef struct _ControllerData {
 } ControllerData_t;
 
 typedef struct _PIDController {
-    double kp, ki, kd, integral, prev_err, prev_time;
+    double kp, ki, kd, integral, prev_err;
+    uint32_t prev_time;
 } PIDController_t;
 
 typedef struct _TaskManager {
     std::function<void()> func;
-    double triggerTime, interval;
+    uint32_t triggerTime, interval;
     bool repeat, active;
 } Tasks_t;
 
@@ -24,21 +25,21 @@ std::unordered_map<std::string, Tasks_t> tasks;
 ControllerData_t controller;
 PIDController_t pid;
 
-void taskCreate(const std::string& name, std::function<void()> func, double delay, bool repeat = false) {
+void taskCreate(const std::string& name, std::function<void()> func, uint32_t delay, bool repeat = false) {
     tasks[name] = {
         .func = func,
-        .triggerTime = ticks_ms() + delay,
-        .repeat = repeat,
+        .triggerTime = millis() + delay,
         .interval = delay,
+        .repeat = repeat,
         .active = true
-    }
+    };
 }
 
 void taskUpdate() {
-    double now = ticks_ms();
+    uint32_t now = millis();
     for (auto& [name, task] : tasks) {
         if (!task.active) continue;
-        if (ticks_diff(now, task.triggerTime) >= 0) {
+        if ((now - task.triggerTime) >= 0) {
             task.func();
             if (task.repeat) task.triggerTime += task.interval;
             else task.active = false;
@@ -115,8 +116,8 @@ double setpoint = 0.0;
 double getYaw() { return wrapRads((angleRead(YAW) - yawOffset) * PI / 180.0); }
 
 double calculatePID(PIDController_t* pid, double setpoint, double current) {
-    double now = ticks_ms();
-    double dt = ticks_diff(now, pid->prev_time) / 1000.0;
+    uint32_t now = millis();
+    double dt = (now - pid->prev_time) / 1000.0;
     pid->prev_time = now;
     
     if (dt <= 0 || dt > 0.1) dt = 0.01;
@@ -129,12 +130,12 @@ double calculatePID(PIDController_t* pid, double setpoint, double current) {
     double derivative = (error - pid->prev_err) / dt;
     pid->prev_err = error;
     
-    return clampf64(pid->kp * error + pid->ki * pid->integral + pid->kd * derivative, -1, 1)
+    return clampf64(pid->kp * error + pid->ki * pid->integral + pid->kd * derivative, -1, 1);
 }
 
 double linearHeading(double yaw) {
     static bool wasTurning = false;
-    double rx = -controller.rx;
+    double rx = controller.rx;
     bool turning = fabs(rx) > 0.1;
 
     if (turning) {
@@ -177,20 +178,20 @@ void movement() {
     double lx = speedControl(controller.lx, 0.25);
     double ly = -speedControl(controller.ly, 0.15);
 
-    double x = (cos(yaw) * lx) + (sin(yaw) * ly);
+    double x = (cos(yaw) * lx) - (sin(yaw) * ly);
     double y = (sin(yaw) * lx) + (cos(yaw) * ly);
     double r = linearHeading(yaw);
     double d = maxf64(fabs(x) + fabs(y) + fabs(r), 1);
 
-    double fl = (((y - x - r) / d));
-    double fr = (((y + x + r) / d));
+    double fl = (((y + x + r) / d));
+    double fr = (((y - x - r) / d));
     double rl = (((y - x + r) / d));
     double rr = (((y + x - r) / d));
 
-    motorWrite(1, fl);
-    motorWrite(2, fr);
-    motorWrite(3, rl);
-    motorWrite(4, rr);
+    motorWrite(1, fl * 50);
+    motorWrite(2, fr * 50);
+    motorWrite(3, rl * 50);
+    motorWrite(4, rr * 50);
 }
 
 void setup() {
@@ -201,7 +202,7 @@ void setup() {
     BP32.setup(&onConnectedController, &onDisconnectedController);
 
     pid.kp = 0.5;
-    pid.kd = 0.05;
+    pid.kd = 0.1;
 }
 
 void loop() {
