@@ -4,6 +4,14 @@
 #include <functional>
 #include <string>
 
+#define ARM_DOWN 10
+#define ARM_UP 110
+#define GRIP_OPEN 135
+#define GRIP_CLOSE 90
+#define HANG_DOWN 90
+#define HANG_MED 120
+#define HANG_UP 135
+
 typedef struct _ControllerData {
     int8_t index, l1, r1, up, down, left, right, triangle, cross, square, circle; // 0, 1 boolean
     double lx, ly, rx, ry, l2, r2; // 0.00 - 1.00 range
@@ -93,6 +101,9 @@ void getControllerData(ControllerData_t* ControllerData) {
     }
 }
 
+inline void grip(int deg) { servoWrite(1, deg); }
+inline void arm(int deg)  { servoWrite(2, deg); }
+inline void hang(int deg) { servoWrite(3, deg); }
 double maxf64(double val1, double val2) { return (val1 > val2) ? val1 : val2; }
 double minf64(double val1, double val2) { return (val1 < val2) ? val1 : val2; }
 double clampf64(double val, double min, double max) { return maxf64(minf64(val, max), min); }
@@ -167,8 +178,57 @@ void control() {
         setpoint = 0.0;
     }
 
-    if (pressOnce("pickup", controller.l1)) {
+    static uint32_t serialPickState = 0;
+    static bool serialRunning = false;
+    if (!serialRunning && pressOnce("serialPick", controller.circle)) {
+        serialRunning = true;
 
+        switch (serialPickState) {
+            case 0: {
+                grip(GRIP_CLOSE);
+                taskCreate("sequence1", []() {
+                    arm(ARM_UP);
+                }, 125);
+                taskCreate("sequence2", []() {
+                    grip(GRIP_OPEN);
+                    hang(HANG_UP);
+                }, 375);
+                taskCreate("sequence3", []() {
+                    arm(ARM_DOWN);
+                    serialRunning = false;
+                }, 400);
+                break;
+            }
+
+            case 1: {
+                grip(GRIP_CLOSE);
+                break;
+            }
+
+            case 2: {
+                grip(GRIP_OPEN);
+                hang(HANG_MED);
+                taskCreate("sequence4", []() {
+                    arm(ARM_UP);
+                }, 25);
+                taskCreate("sequence5", []() {
+                    grip(GRIP_CLOSE);
+                    hang(HANG_DOWN);
+                }, 275);
+                taskCreate("sequence6", []() {
+                    arm(ARM_DOWN);
+                    serialRunning = false;
+                }, 350);
+                break;
+            }
+
+            case 3: {
+                grip(GRIP_OPEN);
+                break;
+            }
+        }
+
+        serialPickState = (serialPickState + 1) % 4;
     }
 }
 
@@ -201,8 +261,12 @@ void setup() {
 
     BP32.setup(&onConnectedController, &onDisconnectedController);
 
-    pid.kp = 0.5;
+    pid.kp = 1;
     pid.kd = 0.1;
+
+    arm(ARM_DOWN);
+    grip(GRIP_OPEN);
+    hang(HANG_DOWN);
 }
 
 void loop() {
