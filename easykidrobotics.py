@@ -45,36 +45,6 @@ def get_imu():
             return True
     return False
 
-def init_imu():
-    global yaw_offset, current_yaw
-    while uart.any(): uart.read()
-
-    start = ticks_ms()
-    samples = 0
-    total = 0.0
-    indx = 0
-
-    rgbled_board.set_brightness(10)
-    while ticks_diff(ticks_ms(), start) < 1000:
-        if samples % 20 == 0:
-            rgbled_board.set_color(indx, "#67c0ff")
-            rgbled_board.show()
-            indx += 1
-
-        if get_imu():
-            total += current_yaw
-            samples += 1
-        sleep_ms(5)
-
-    rgbled_board.clear()
-    if samples > 0:
-        yaw_offset = total / samples
-        current_yaw = 0.0
-        rgbled_board.set_color(1, "#6aff67")
-    else: rgbled_board.set_color(1, "#ff6767")
-    rgbled_board.show()
-
-
 def clamp(val, min_val=-1.0, max_val=1.0):
     return max(min(val, max_val), min_val)
 
@@ -115,19 +85,12 @@ class PIDController:
 controller = PIDController(kp=2, ki=0.02, kd=0.1)
 setpoint = 0.0
 
-def speed_control(value):
+def speed_control(value, onControlled):
     abs_val = abs(value)
-    if bluepad32.r2(): return value * 0.15
-    elif abs_val < 0.1: return 0
-    elif abs_val <= 0.3: return value * 0.35
+    if bluepad32.r2(): return value * onControlled
+    elif abs_val <= 0.1: return 0
+    elif abs_val <= 0.3: return value * 0.3
     else: return value
-
-def atan2_heading(rx, ry, yaw):
-    global setpoint
-    if (rx * rx + ry * ry > 0.5625): setpoint = atan2(rx, ry)
-    r = controller.calculate(setpoint, yaw)
-    if bluepad32.r2(): r = clamp(r, -0.2, 0.2)
-    return r
 
 last_rx = 0
 def linear_heading(rx, yaw):
@@ -142,37 +105,17 @@ def linear_heading(rx, yaw):
     if abs(rx) > 0.1: last_rx = ticks_ms()
     return r
 
-def dpad_control(yaw):
-    global setpoint
-    x = 0; y = 0
-    if bluepad32.up(): y += 1
-    if bluepad32.down(): y -= 1
-    if bluepad32.right(): x -= 1
-    if bluepad32.left(): x += 1
-    if x != 0 or y != 0:
-        setpoint = atan2(x, y)
-        x = clamp(speed_control(sin(setpoint)) * 1.5, -1, 1)
-        y = speed_control(cos(setpoint))
-    return controller.calculate(setpoint, yaw), x, y
-
-heading_toggle = False
-
 def movement():
     global setpoint
 
     rawx = -bluepad32.axisX() / 512
     rawy = -bluepad32.axisY() / 512
-    lx = clamp(speed_control(rawx) * 1.5, -1, 1)
-    ly = speed_control(rawy)
+    lx = speed_control(rawx, 0.25)
+    ly = speed_control(rawy, 0.15)
     rx = -bluepad32.axisRX() / 512.0
-    ry = -bluepad32.axisRY() / 512.0
     yaw = radians(current_yaw)
 
-    if bluepad32.up() or bluepad32.down() or bluepad32.right() or bluepad32.left(): r, lx, ly = dpad_control(yaw)
-    elif heading_toggle: r = linear_heading(rx, yaw)
-    else:
-        if bluepad32.l2(): r = atan2_heading(rawx, rawy, yaw)
-        else: r = atan2_heading(rx, ry, yaw)
+    r = linear_heading(rx, yaw)
     if abs(lx) < 0.1 and abs(ly) < 0.1 and abs(r) < 0.01: r = 0
 
     # movement
@@ -204,76 +147,18 @@ def pressed_once(name, current):
     
     return clicked
 
-LIFT_UP = 35 # TO BE SYNCED
-LIFT_STEAL = 45
-LIFT_DOWN = 90
-LG_OPEN = 0
-LG_CLOSE = 60
-RG_OPEN = 60
-RG_CLOSE = 0
-
-lift_up = True
-lg_open = True
-rg_open = True
-steal_state = True
-macro_active = 0
-
-def arm():
-    global lift_up, lg_open, rg_open, macro_active, steal_state
-
-    if pressed_once("cross", bluepad32.cross()):
-        macro_active = 0
-        if lift_up: servo.angle(servo.SV2, LIFT_DOWN)
-        else: servo.angle(servo.SV2, LIFT_UP)
-        lift_up = not lift_up
-    
-    if pressed_once("l1", bluepad32.l1()):
-        if lg_open: servo.angle(servo.SV3, LG_CLOSE)
-        else: servo.angle(servo.SV3, LG_OPEN)
-        lg_open = not lg_open
-
-    if pressed_once("r1", bluepad32.r1()):
-        if rg_open: servo.angle(servo.SV4, RG_CLOSE)
-        else: servo.angle(servo.SV4, RG_OPEN)
-        rg_open = not rg_open
-
-    if pressed_once("triangle", bluepad32.triangle()) and macro_active == 0:
-        if steal_state:
-            servo.angle(servo.SV2, LIFT_STEAL)
-            servo.angle(servo.SV3, LG_OPEN)
-            servo.angle(servo.SV4, RG_OPEN)
-            lg_open, rg_open = True, True
-        else:
-            servo.angle(servo.SV3, LG_CLOSE)
-            servo.angle(servo.SV4, RG_CLOSE)
-            lg_open, rg_open = False, False
-            macro_active = ticks_ms()
-        steal_state = not steal_state
-
-    if pressed_once("circle", bluepad32.circle()) and macro_active == 0:
-        servo.angle(servo.SV3, LG_CLOSE)
-        servo.angle(servo.SV4, RG_CLOSE)
-        lg_open, rg_open = False, False
-        macro_active = ticks_ms()
-
-    if macro_active != 0 and ticks_diff(ticks_ms(), macro_active) > 150:
-        servo.angle(servo.SV2, LIFT_UP)
-        lift_up, steal_state = True, True
-        macro_active = 0
-
-def yaw_control():
+def control():
     global setpoint, yaw_offset
     if pressed_once("square", bluepad32.square()):
         yaw_offset += current_yaw
         setpoint = 0
 
 gamepad_state = True
-heading_state = True
 team_switch = 0
 started = False
 
 def configuration():
-    global gamepad_state, heading_toggle, heading_state, team_switch, started
+    global gamepad_state, team_switch, started
 
     if pressed_once("circle", bluepad32.circle()):
         if team_switch == 0 or team_switch == 2:
@@ -290,35 +175,21 @@ def configuration():
             started = True
         return
 
-    if pressed_once("triangle", bluepad32.triangle()):
-        heading_toggle = not heading_toggle
-
     connection = bluepad32.is_connected()
     if connection != gamepad_state:
         gamepad_state = connection
         rgbled_board.set_color(2, "#6aff67" if gamepad_state else "#ff6767")
         rgbled_board.show()
 
-    if heading_toggle != heading_state:
-        heading_state = heading_toggle
-        rgbled_board.set_color(3, "#faff67" if heading_state else "#67cfff")
-        rgbled_board.show()
-
 def main():
-    init_imu()
-    while not started: configuration()
+    while uart.any(): uart.read()
+    # while not started: configuration()
     while 1:
         get_imu()
-        yaw_control()
         movement()
-        arm()
+        control()
 
 # -------------------- Start --------------------
 
 print("initializing")
-
-servo.angle(servo.SV2, 0)
-servo.angle(servo.SV3, LG_CLOSE)
-servo.angle(servo.SV4, RG_CLOSE)
-
 main()
