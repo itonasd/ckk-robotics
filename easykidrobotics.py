@@ -212,14 +212,38 @@ class TaskManager:
                 task = s.tasks.pop(i)
                 task["f"]()
 
-class ClientIO:
+servo.angle(servo.SV6, 135)
+servo.angle(servo.SV5, 10)
+servo.angle(servo.SV4, 95)
 
-    def __init__(s):
-        s.states = {}
+sleep_ms(2000)
 
-    def pressed(s, name, current):
-        previous_state = s.states.get(name, False)
-        clicked = current and not previous_state
-        s.states[name] = current
-        
-        return clicked
+
+servo.angle(servo.SV6, 85)
+
+sleep_ms(60)
+
+servo.angle(servo.SV5, 115)
+
+sleep_ms(240)
+
+servo.angle(servo.SV6, 135)
+servo.angle(servo.SV4, 140)
+servo.angle(servo.SV5, 10)
+
+#sleep_ms(2000)
+
+#servo.angle(servo.SV4, 130)
+#servo.angle(servo.SV5, 115)
+
+#sleep_ms(100)
+
+#servo.angle(servo.SV6, 85)
+
+#sleep_ms(60)
+
+#servo.angle(servo.SV4, 95)
+
+#sleep_ms(40)
+
+#servo.angle(servo.SV5, 10)
