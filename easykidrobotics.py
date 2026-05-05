@@ -193,3 +193,33 @@ def main():
 
 print("initializing")
 main()
+
+class TaskManager:
+
+    def __init__(s):
+        s.tasks = []
+
+    def create(s, ms, callback):
+        s.tasks.append({
+            "t": ticks_ms() + ms,
+            "f": callback
+        })
+
+    def update(s):
+        now = ticks_ms()
+        for i in range(len(s.tasks) - 1, -1, -1):
+            if ticks_diff(s.tasks[i]["t"], now) <= 0:
+                task = s.tasks.pop(i)
+                task["f"]()
+
+class ClientIO:
+
+    def __init__(s):
+        s.states = {}
+
+    def pressed(s, name, current):
+        previous_state = s.states.get(name, False)
+        clicked = current and not previous_state
+        s.states[name] = current
+        
+        return clicked
