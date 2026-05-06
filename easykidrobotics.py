@@ -1,4 +1,4 @@
-from machine import UART
+from machine import UART, Pin
 from time import ticks_ms, ticks_diff, sleep_ms
 from math import cos, sin, radians, pi, atan2
 from board import motor, servo, rgbled_board
@@ -81,16 +81,38 @@ class PIDController:
         output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
         return clamp(output, -self.output_limit, self.output_limit)
 
+class TaskManager:
 
-controller = PIDController(kp=2, ki=0.02, kd=0.1)
+    def __init__(s):
+        s.tasks = []
+
+    def create(s, ms, callback, params = 0):
+        s.tasks.append({
+            "t": ticks_ms() + ms,
+            "f": callback,
+            "p": params
+        })
+
+    def update(s):
+        now = ticks_ms()
+        for i in range(len(s.tasks) - 1, -1, -1):
+            if ticks_diff(s.tasks[i]["t"], now) <= 0:
+                task = s.tasks.pop(i)
+                task["f"](task["p"])
+
+task = TaskManager()
+
+
+controller = PIDController(kp=1, ki=0, kd=0.08)
 setpoint = 0.0
 
-def speed_control(value, onControlled):
+def speed_control(value, onControlledR2, onControlledL2):
     abs_val = abs(value)
-    if bluepad32.r2(): return value * onControlled
+    if bluepad32.r2(): return value * onControlledR2
+    if bluepad32.l2(): return value * onControlledL2
     elif abs_val <= 0.1: return 0
     elif abs_val <= 0.3: return value * 0.3
-    else: return value
+    else: return value * 0.65
 
 last_rx = 0
 def linear_heading(rx, yaw):
@@ -110,8 +132,8 @@ def movement():
 
     rawx = -bluepad32.axisX() / 512
     rawy = -bluepad32.axisY() / 512
-    lx = speed_control(rawx, 0.25)
-    ly = speed_control(rawy, 0.15)
+    lx = speed_control(rawx, 0.3, 1)
+    ly = speed_control(rawy, 0.2, 0.9)
     rx = -bluepad32.axisRX() / 512.0
     yaw = radians(current_yaw)
 
@@ -147,11 +169,69 @@ def pressed_once(name, current):
     
     return clicked
 
+
+pickState = 0
+normalPick = False
+armUp = False
+
 def control():
-    global setpoint, yaw_offset
+    global setpoint, yaw_offset, pickState, normalPick, armUp
     if pressed_once("square", bluepad32.square()):
         yaw_offset += current_yaw
         setpoint = 0
+
+    if pressed_once("l1", bluepad32.l1()):
+        if pickState == 0:
+            servo.angle(servo.SV6, 85)
+            task.create(60, lambda x: servo.angle(servo.SV5, 130))
+            task.create(300, lambda x: servo.angle(servo.SV6, 135))
+            task.create(300, lambda x: servo.angle(servo.SV4, 140))
+            task.create(300, lambda x: servo.angle(servo.SV5, 10))
+
+            pickState = 1
+        elif pickState == 1:
+            servo.angle(servo.SV6, 85)
+            
+            pickState = 2
+        elif pickState == 2:
+            servo.angle(servo.SV6, 135)
+            servo.angle(servo.SV4, 130)
+
+            task.create(50, lambda x: servo.angle(servo.SV5, 130))
+
+            task.create(150, lambda x: servo.angle(servo.SV6, 85))
+            task.create(210, lambda x: servo.angle(servo.SV4, 95))
+            task.create(250, lambda x: servo.angle(servo.SV5, 10))
+            
+            pickState = 3
+        elif pickState == 3:
+            servo.angle(servo.SV6, 135)
+
+            pickState = 0
+
+    if bluepad32.circle():
+        Pin(14, Pin.OUT).value(0)
+        Pin(15, Pin.OUT).value(1)
+    elif bluepad32.cross():
+        Pin(14, Pin.OUT).value(1)
+        Pin(15, Pin.OUT).value(0)
+    else:
+        Pin(14, Pin.OUT).value(1)
+        Pin(15, Pin.OUT).value(1)
+
+    if pressed_once("r1", bluepad32.r1()):
+        if normalPick:
+            servo.angle(servo.SV6, 135)
+        else:
+            servo.angle(servo.SV6, 85)
+        normalPick = not normalPick
+
+    if pressed_once("triangle", bluepad32.triangle()):
+        if armUp:
+            servo.angle(servo.SV5, 75)
+        else:
+            servo.angle(servo.SV5, 10)
+        armUp = not armUp
 
 gamepad_state = True
 team_switch = 0
@@ -185,6 +265,7 @@ def main():
     while uart.any(): uart.read()
     # while not started: configuration()
     while 1:
+        task.update()
         get_imu()
         movement()
         control()
@@ -192,58 +273,9 @@ def main():
 # -------------------- Start --------------------
 
 print("initializing")
+
 main()
-
-class TaskManager:
-
-    def __init__(s):
-        s.tasks = []
-
-    def create(s, ms, callback):
-        s.tasks.append({
-            "t": ticks_ms() + ms,
-            "f": callback
-        })
-
-    def update(s):
-        now = ticks_ms()
-        for i in range(len(s.tasks) - 1, -1, -1):
-            if ticks_diff(s.tasks[i]["t"], now) <= 0:
-                task = s.tasks.pop(i)
-                task["f"]()
 
 servo.angle(servo.SV6, 135)
 servo.angle(servo.SV5, 10)
 servo.angle(servo.SV4, 95)
-
-sleep_ms(2000)
-
-
-servo.angle(servo.SV6, 85)
-
-sleep_ms(60)
-
-servo.angle(servo.SV5, 115)
-
-sleep_ms(240)
-
-servo.angle(servo.SV6, 135)
-servo.angle(servo.SV4, 140)
-servo.angle(servo.SV5, 10)
-
-#sleep_ms(2000)
-
-#servo.angle(servo.SV4, 130)
-#servo.angle(servo.SV5, 115)
-
-#sleep_ms(100)
-
-#servo.angle(servo.SV6, 85)
-
-#sleep_ms(60)
-
-#servo.angle(servo.SV4, 95)
-
-#sleep_ms(40)
-
-#servo.angle(servo.SV5, 10)
